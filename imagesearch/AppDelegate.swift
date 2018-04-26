@@ -21,11 +21,6 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         window?.rootViewController = UINavigationController(rootViewController: ImagesViewController())
         window?.makeKeyAndVisible()
 
-//        let query = ImagesFetchQuery(searchText: "hello", imageFormat: .png, limit: 4, position: 1)
-//        try! MediaService.init().fetchImages(using: query, { (succeed, result, error) in
-//
-//        })
-
         return true
     }
 
