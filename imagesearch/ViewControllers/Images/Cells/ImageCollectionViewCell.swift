@@ -10,5 +10,17 @@ import UIKit
 
 class ImageCollectionViewCell: UICollectionViewCell, ReusableCollectionViewCell {
     @IBOutlet private var imageView: UIImageView!
-    @IBOutlet private var loadingIndicatorVIew: UIActivityIndicatorView!
+    
+    var image: UIImage? {
+        get { return imageView.image }
+        set {
+            imageView.backgroundColor = newValue == nil ? UIColor(white: 0.9, alpha: 1) : nil
+            imageView.image = newValue
+        }
+    }
+    
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        imageView.image = nil
+    }
 }

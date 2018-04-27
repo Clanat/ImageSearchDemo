@@ -7,13 +7,20 @@
 //
 
 import Foundation
+import UIKit
 
 enum ImageFormat: String {
     // TODO: support other formats
-    case png
+    case jpg
+}
+
+enum ImageSize: String {
+    case medium
 }
 
 struct ImagesFetchQuery {
+    static let limit = 10
+    
     private enum Keys: String {
         case searchText = "q"
         case imageFormat = "fileType"
@@ -24,8 +31,10 @@ struct ImagesFetchQuery {
 
     let searchText: String?
     let imageFormat: ImageFormat
-    let limit: Int
     let position: Int
+    
+    // TODO: support sizes
+    let imageSize: ImageSize = .medium
 
     func serialize() -> [String: String] {
         var rawObject = [String: String]()
@@ -36,15 +45,15 @@ struct ImagesFetchQuery {
 
         // TODO: validation
         rawObject[Keys.imageFormat.rawValue] = imageFormat.rawValue
-        rawObject[Keys.limit.rawValue] = "\(limit)"
+        rawObject[Keys.limit.rawValue] = "\(ImagesFetchQuery.limit)"
         rawObject[Keys.position.rawValue] = "\(position)"
-        rawObject[Keys.imageSize.rawValue] = "medium"
+        rawObject[Keys.imageSize.rawValue] = imageSize.rawValue
 
         return rawObject
     }
 }
 
-struct ImagesFetchResult: Decodable {
+final class ImagesSearchResult: Decodable {
     private enum ResultKeys: String, CodingKey {
         case queries
         case items
@@ -67,6 +76,19 @@ struct ImagesFetchResult: Decodable {
         nextResults = try queriesContainer.decode([SearchResultInfo].self, forKey: .nextPage)
 
         images = try rootContainer.decode([Image].self, forKey: .items)
+    }
+}
+
+final class ImagesFetchResult {
+    var images: [Image]
+    var position: Int
+    
+    var nextPosition: Int?
+    
+    init(images: [Image], position: Int, nextPosition: Int?) {
+        self.images = images
+        self.position = position
+        self.nextPosition = nextPosition
     }
 }
 
@@ -100,9 +122,10 @@ struct SearchResultInfo: Decodable {
 
 final class MediaService {
     typealias ImagesFetchCallback = (_ succeed: Bool, _ result: ImagesFetchResult?, _ error: Error?) -> Void
+    typealias ImageLoadCallback = (_ succeed: Bool, _ image: UIImage?, _ error: Error?) -> Void
 
     private enum Constants {
-        static let endpointURLString = "https://www.googleapis.com/customsearch/v1"
+        static let googleSearchURLString = "https://www.googleapis.com/customsearch/v1"
         static let googleApiKey = "AIzaSyAlFYcGh4ZqNe3EVuc-2mTv1E17e0qhINE"
         static let googleSearchEngineId = "004647109859050968818:jy5dzwbbbxw"
     }
@@ -115,14 +138,7 @@ final class MediaService {
 
     // MARK: - Properties
 
-    private let urlSession: URLSession
-
-    init() {
-        let queue = OperationQueue()
-        queue.qualityOfService = .background
-        queue.maxConcurrentOperationCount = 5
-        urlSession = URLSession(configuration: .default, delegate: nil, delegateQueue: queue)
-    }
+    private let urlSession: URLSession = URLSession(configuration: .default)
 }
 
 // MARK: - Images fetching
@@ -130,7 +146,7 @@ final class MediaService {
 extension MediaService {
     @discardableResult
     func fetchImages(using query: ImagesFetchQuery, _ callback: @escaping ImagesFetchCallback) throws -> URLSessionTask {
-        guard var urlComponents = URLComponents(string: Constants.endpointURLString) else {
+        guard var urlComponents = URLComponents(string: Constants.googleSearchURLString) else {
             throw ImagesFetchError.requestCreationFailure
         }
 
@@ -156,8 +172,36 @@ extension MediaService {
             let decoder = JSONDecoder()
 
             do {
-                let result = try decoder.decode(ImagesFetchResult.self, from: data)
-                DispatchQueue.main.async { callback(true, result, nil) }
+                let searchResult = try decoder.decode(ImagesSearchResult.self, from: data)
+                
+                // Retrieving info about results
+                guard let searchResultInfo = searchResult.currentResults.last else {
+                    failureHandler(ImagesFetchError.invalidResponse)
+                    return
+                }
+                
+                
+                // Google image search is deprecated and no longer available
+                // Google CSE (custom search engine) has some limitations
+                // 1. Limit is low
+                // 2. 100 requests per day
+                // https://stackoverflow.com/questions/37579267/custom-google-search-increase-number-of-results
+                
+                // Make fake copies for pagination
+                var fetchedImages = searchResult.images
+                if fetchedImages.count == ImagesFetchQuery.limit {
+                    fetchedImages += fetchedImages
+                    fetchedImages += fetchedImages
+                    fetchedImages += fetchedImages
+                    fetchedImages += fetchedImages
+                    fetchedImages += fetchedImages
+                }
+                
+                let nextPosition = searchResult.nextResults.last?.position
+                let fetchResult = ImagesFetchResult(images: fetchedImages,
+                                                    position: searchResultInfo.position,
+                                                    nextPosition: nextPosition)
+                DispatchQueue.main.async { callback(true, fetchResult, nil) }
             } catch {
                 failureHandler(error)
             }
@@ -186,9 +230,66 @@ extension MediaService {
         task.resume()
         return task
     }
+    
+    @discardableResult
+    func fetchFakeImages(using query: ImagesFetchQuery, _ callback: @escaping ImagesFetchCallback) throws -> URLSessionTask {
+        DispatchQueue.global().async {
+            guard let fakeImageURL = URL(string: "https://png.icons8.com/ios/400/swift-filled.png") else {
+                DispatchQueue.main.async {
+                    callback(false, nil, ImagesFetchError.invalidImageURL)
+                }
+                return
+            }
+            
+            let images = [Image](repeating: Image(url: fakeImageURL), count: 100)
+            let result = ImagesFetchResult(images: images, position: query.position, nextPosition: query.position + 100)
+            
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                callback(true, result, nil)
+            }
+        }
+        
+        return URLSessionTask()
+    }
+    
+    @discardableResult
+    func loadImage(from url: URL, _ callback: @escaping ImageLoadCallback) -> URLSessionTask {
+        let task = urlSession.dataTask(with: url) { (data, response, error) in
+            
+            if let error = error, (error as NSError).code == NSURLErrorCancelled {
+                return
+            }
+            
+            guard let data = data else {
+                DispatchQueue.main.async {
+                    callback(false, nil, error ?? ImageLoadError.unknown)
+                }
+                return
+            }
+            
+            let image = UIImage(data: data)
+            DispatchQueue.main.async {
+                callback(true, image, nil)
+            }
+        }
+        
+        task.resume()
+        return task
+    }
 }
 
 enum ImagesFetchError: Error {
+    // TODO: localized errors
     case requestCreationFailure
+    case invalidImageURL
     case invalidResponse
 }
+
+enum ImageLoadError: Error {
+    // TODO: localized errors
+    case unknown
+}
+
+
+
+

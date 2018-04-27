@@ -16,22 +16,17 @@ final class ImagesViewModel {
 
     private let mediaService = MediaService()
 
-    private var imagesFetchResult: ImagesFetchResult? {
-        didSet {
-            guard let numberOfFetchedItems = imagesFetchResult?.currentResults.last?.numberOfFetchedItems else {
-                numberOfImages.value = 0
-                return
-            }
+    private var imagesFetchResult: ImagesFetchResult?
 
-            numberOfImages.value = numberOfFetchedItems
-        }
+    /// Image loading tasks keyed by image id
+    private lazy var imagesLoadingTasksMap = [String: URLSessionTask]()
+    
+    private var imagesFetchTask: URLSessionTask?
+    
+    var numberOfImages: Int {
+        return imagesFetchResult?.images.count ?? 0
     }
-
-    private var imagesReloadingWorkItem: DispatchWorkItem?
-
-    let numberOfImages = ObservableProperty<Int>(0)
-    let isLoadingImages = ObservableProperty<Bool>(false)
-
+    
     // MARK: - Lifecycle
 
     init(for viewController: ImagesViewController) {
@@ -39,78 +34,121 @@ final class ImagesViewModel {
     }
 
     deinit {
-        imagesReloadingWorkItem?.cancel()
-    }
-
-    // Mark: - View data
-
-    func getImage(at index: Int) -> UIImage? {
-        return nil
+        imagesFetchTask?.cancel()
     }
 
     // MARK: - View events
-
-    func handleViewDidLoadEvent() {
-
-    }
-
-    func handleViewPullToRefreshEvent() {
-
-    }
-
-    func handleImageRequest(at index: Int) {
-
-    }
-
-    func handleImageCancellationRequest(at index: Int) {
-
-    }
-
-    func viewDidRequestReloadImages(withSearchText searchText: String) {
-        imagesReloadingWorkItem?.cancel()
-        imagesReloadingWorkItem = nil
-
-        guard !searchText.isEmpty else {
-            imagesFetchResult = nil
+    
+    func viewDidRequestImage(at imageIndex: Int) {
+        guard let image = imagesFetchResult?.images[imageIndex] else {
             return
         }
-
-        let workItem = DispatchWorkItem { [weak self] in
-            self?.reloadImagesAsync(withSearchText: searchText)
+        
+        let imageId = image.id
+        let imageURL = image.url
+        let task = mediaService.loadImage(from: imageURL) { [weak self] (succeed, image, error) in
+            guard let strongSelf = self else { return }
+            
+            guard succeed, let image = image else {
+                strongSelf.didFailLoadingImage(at: imageIndex, with: error ?? ImageLoadError.unknown)
+                return
+            }
+            
+            strongSelf.didLoadImage(image, at: imageIndex, withId: imageId)
         }
         
-        imagesReloadingWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: workItem)
+        imagesLoadingTasksMap[imageId] = task
     }
-
-    // MARK: - Images loading
-
-    @objc private func reloadImagesAsync(withSearchText searchText: String) {
-        isLoadingImages.value = true
-
-        // Position starts from `1`
-        let query = ImagesFetchQuery(searchText: searchText, imageFormat: .png, limit: 10, position: 1)
-
+    
+    func viewDidCancelImageLoading(at imageIndex: Int) {
+        guard !imagesLoadingTasksMap.isEmpty else { return }
+        
+        guard let imageId = imagesFetchResult?.images[imageIndex].id else {
+            return
+        }
+        
+        guard let task = imagesLoadingTasksMap[imageId] else {
+            return
+        }
+        
+        task.cancel()
+        imagesLoadingTasksMap[imageId] = nil
+    }
+    
+    func viewDidRequestNextImages() {
+        guard imagesFetchTask == nil else { return }
+        
+        // Assume we have next page
+        guard let fetchResult = imagesFetchResult, let nextPosition = fetchResult.nextPosition else { return }
+        
+        viewController?.beginNextPageLoading()
+        
+        let query = ImagesFetchQuery(searchText: viewController?.searchText, imageFormat: .jpg, position: nextPosition)
         do {
-            try mediaService.fetchImages(using: query) { [weak self] (succeed, result, error) in
+            imagesFetchTask = try mediaService.fetchFakeImages(using: query) { [weak self] (succeed, result, error) in
                 guard let strongSelf = self else { return }
-
-                guard succeed else {
-                    // TODO
-                    strongSelf.isLoadingImages.value = false
-                    return
+                
+                strongSelf.viewController?.endNextPageLoading()
+                
+                // TODO: handle errors
+                
+                strongSelf.imagesFetchTask = nil
+                
+                if let oldResult = strongSelf.imagesFetchResult, let newResult = result {
+                    oldResult.images += newResult.images
+                    oldResult.position = newResult.position
+                    oldResult.nextPosition = newResult.nextPosition
+                    strongSelf.viewController?.insertNewImages(count: newResult.images.count)
                 }
-
-                strongSelf.imagesFetchResult = result
-                strongSelf.isLoadingImages.value = false
             }
         } catch {
-            // TODO
+            viewController?.endNextPageLoading()
+            // TODO: handle errors
         }
     }
+
+    func viewDidRequestReloadImages() {
+        imagesFetchTask?.cancel()
+        imagesFetchTask = nil
+        
+        imagesLoadingTasksMap.forEach { (imageId, imageLoadingTask) in
+            imageLoadingTask.cancel()
+        }
+        
+        imagesLoadingTasksMap = [:]
+        
+        viewController?.beginReloading()
+        
+        // Position starts from `1`
+        let query = ImagesFetchQuery(searchText: viewController?.searchText, imageFormat: .jpg, position: 1)
+
+        do {
+            imagesFetchTask = try mediaService.fetchFakeImages(using: query) { [weak self] (succeed, result, error) in
+                guard let strongSelf = self else { return }
+                
+                // TODO: handle errors
+                
+                strongSelf.imagesFetchTask = nil
+                strongSelf.imagesFetchResult = result
+                strongSelf.viewController?.reloadImages()
+                strongSelf.viewController?.endReloading()
+            }
+        } catch {
+            // TODO: handle errors
+        }
+    }
+    
+    private func didLoadImage(_ image: UIImage, at imageIndex: Int, withId imageId: String) {
+        imagesLoadingTasksMap[imageId] = nil
+        viewController?.updateImage(at: imageIndex, with: image)
+    }
+    
+    private func didFailLoadingImage(at imageIndex: Int, with error: Error) {
+        guard let image = imagesFetchResult?.images[imageIndex] else { return }
+        
+        NSLog("Could not load image at \(image.url), reason: ", error.localizedDescription)
+    }
 }
-
-
 
 
 
