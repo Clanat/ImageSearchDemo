@@ -9,7 +9,7 @@
 import UIKit
 
 class ImageCollectionViewCell: UICollectionViewCell, ReusableCollectionViewCell {
-    @IBOutlet private var imageView: UIImageView!
+    @IBOutlet private weak var imageView: UIImageView!
     
     var image: UIImage? {
         get { return imageView.image }
